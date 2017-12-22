@@ -1,0 +1,7 @@
+exp
+*.pyc
+*~
+*.ipynb*
+util/hungarian.so
+*.jpg
+*.h5
