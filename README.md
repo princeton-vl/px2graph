@@ -29,6 +29,13 @@ Make sure to add the parent directory of px2graph to your PYTHONPATH.
 
 - Clone repo from [here](https://github.com/mbaradad/munkres-tensorflow)
 - Follow build instructions (make sure to use g++ 4.X)
+- For newer versions of TensorFlow it was a bit difficult to get this working, here is the command that finally worked for me:
+```
+TF_INC=$(python -c 'import tensorflow as tf; print(tf.sysconfig.get_include())')
+TF_LIB=$(python -c 'import tensorflow as tf; print(tf.sysconfig.get_lib())')
+
+g++-4.9 -std=c++11 -shared hungarian.cc -o hungarian.so -fPIC -I$TF_INC -I$TF_INC/external/nsync/public -L$TF_LIB -ltensorflow_framework -O2 -D_GLIBCXX_USE_CXX11_ABI=0
+```
 - Place 'hungarian.so' in util/
 
 #### Download data
