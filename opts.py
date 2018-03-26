@@ -40,9 +40,9 @@ def parse_command_line():
         help='Suppress print statements used to monitor training progress')
 
     # Hyperparameters
-    parser.add_argument('-l','--learning_rate', type=float, default=2e-4)
+    parser.add_argument('-l','--learning_rate', type=float, default=3e-3)
     parser.add_argument('--batchsize', type=int, default=8)
-    parser.add_argument('--optimizer', type=str, default='AdamOptimizer')
+    parser.add_argument('--optimizer', type=str, default='MomentumOptimizer')
     parser.add_argument('--drop_rate', type=float, default=0.)
     parser.add_argument('--clip_grad', type=float, default=1.)
     parser.add_argument('--batchnorm', type=int, default=0)
@@ -51,7 +51,7 @@ def parse_command_line():
     parser.add_argument('--input_res', type=int, default=512)
     parser.add_argument('--output_res', type=int, default=64)
     parser.add_argument('--num_data_threads', type=int, default=4)
-    parser.add_argument('--max_queue_size', type=int, default=64)
+    parser.add_argument('--max_queue_size', type=int, default=256)
 
     # Model
     parser.add_argument('--num_feats', type=int, default=256)
@@ -67,11 +67,17 @@ def parse_command_line():
         help='Set to 1 to use RPN proposals (only applies in SG setting)')
     parser.add_argument('--obj_slots', type=int, default=3)
     parser.add_argument('--rel_slots', type=int, default=6)
-    parser.add_argument('--detect_thr', type=str, default='0.05-.2-.2-0.05-0.1-0.1')
+    parser.add_argument('--obj_thr', type=str, default='0.15-.06-.15')
+    parser.add_argument('--rel_thr', type=str, default='0.03-0.01-0.03')
+    parser.add_argument('--class_thr', type=str, default='.5-.5-.15-15')
+
+    # sg_task:CL defaults - obj_thr: .15-.15-.2, rel_thr: .005-.01-.001
 
     parser.add_argument('--obj_box_nms', type=float, default=.5)
     parser.add_argument('--obj_hm_nms', type=float, default=0)
     parser.add_argument('--rel_hm_nms', type=float, default=0)
+
+    parser.add_argument('--rel_top_k', type=int, default=10)
 
     # Tag options
     parser.add_argument('--tag_dim', type=int, default=8)
@@ -101,10 +107,21 @@ def parse_command_line():
                 else: tmp_arg = val[2:]
                 if tmp_arg in flags.__dict__:
                     opts[tmp_arg] = flags.__dict__[tmp_arg]
-        
+
         # Load old flags
         with open('exp/'+tmp_exp_dir+'/opts.p','rb') as f:
             old_flags = pickle.load(f)
+
+        # Check if optimizer has been changed
+        old_flags.new_optim = False
+        if 'optimizer' in opts:
+            if old_flags.optimizer != opts['optimizer']:
+                print("Changing optimizer from %s to %s" %
+                      (old_flags.optimizer, opts['optimizer']))
+                old_flags.new_optim = True
+        elif old_flags.optimizer == 'None':
+            old_flags.optimizer = 'MomentumOptimizer'
+            old_flags.new_optim = True
 
         # Replace values that have been manually set
         for opt in opts.keys():
@@ -177,8 +194,11 @@ def parse_command_line():
         sys.stderr = f
 
     # Split strings into lists
-    flags.scale_feats = list(map(float, flags.scale_feats.split('-')))
-    flags.detect_thr = list(map(float, flags.detect_thr.split('-')))
+    split_str = lambda x: list(map(float, x.split('-')))
+    flags.scale_feats = split_str(flags.scale_feats)
+    flags.obj_thr = split_str(flags.obj_thr)
+    flags.rel_thr = split_str(flags.rel_thr)
+    flags.class_thr = split_str(flags.class_thr)
 
     return flags
 

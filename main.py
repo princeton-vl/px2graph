@@ -7,13 +7,13 @@ from px2graph.util import setup
 from px2graph.opts import parse_command_line
 
 def main():
-    
+
     # Initial setup
     opt = parse_command_line()
     train_flag = tf.placeholder(tf.bool, [])
     task, loader, inp, label, sample_idx = setup.init_task(opt, train_flag)
-    net, loss, pred, accuracy, optim = setup.init_model(opt, task, inp, label,
-                                                        sample_idx, train_flag)
+    net, loss, pred, accuracy, optim, lr = setup.init_model(opt, task, inp, label,
+                                                            sample_idx, train_flag)
 
     # Prepare TF session
     summaries, image_summaries = task.setup_summaries(net, inp, label, loss, pred, accuracy)
@@ -29,7 +29,14 @@ def main():
     # Restore previous session if continuing experiment
     if opt.restore_session is not None:
         print("Restoring previous session...",'(exp/' + opt.restore_session + '/snapshot)')
-        saver.restore(sess, 'exp/' + opt.restore_session + '/snapshot')
+
+        if opt.new_optim:
+          # Optimizer changed, don't load values associated with old optimizer
+          tmp_vars = tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES)
+          tmp_saver = tf.train.Saver(tmp_vars)
+          tmp_saver.restore(sess, 'exp/' + opt.restore_session + '/snapshot')
+        else:
+          saver.restore(sess, 'exp/' + opt.restore_session + '/snapshot')
 
     # Load pretrained weights
     for tmp_model,scopes in opt.load_from.items():
@@ -50,9 +57,11 @@ def main():
 
                 print("Round %d: %s" % (round_idx, split))
                 loader.start_epoch(sess, split, train_flag, opt.iters[split] * opt.batchsize)
+
                 flag_val = split == 'train'
 
                 for step in tqdm(range(opt.iters[split]), ascii=True):
+                    global_step = step + round_idx * opt.iters[split]
                     to_run = [sample_idx, summaries[split], loss, accuracy]
                     if split == 'train': to_run += [optim]
 
@@ -60,12 +69,25 @@ def main():
                     do_image_summary = step == opt.iters[split] - 1
                     if do_image_summary: to_run[1] = image_summaries[split]
 
+                    # Start with lower learning rate to prevent early divergence
+                    t = 1/(1+np.exp(-(global_step-5000)/1000))
+                    lr_start = opt.learning_rate / 15
+                    lr_end = opt.learning_rate
+                    tmp_lr = (1-t) * lr_start + t * lr_end
+
                     # Run computation graph
-                    result = sess.run(to_run, feed_dict={train_flag:flag_val})
+                    result = sess.run(to_run, feed_dict={train_flag:flag_val, lr:tmp_lr})
+
+                    out_loss = result[2]
+                    if sum(out_loss) > 1e5:
+                        print("Loss diverging...exiting before code freezes due to NaN values.")
+                        print("If this continues you may need to try a lower learning rate, a")
+                        print("different optimizer, or a larger batch size.")
+                        return
 
                     # Log data
                     if split == 'valid' or (split == 'train' and step % 20 == 0) or do_image_summary:
-                        writer.add_summary(result[1], step + round_idx * opt.iters[split])
+                        writer.add_summary(result[1], global_step)
                         writer.flush()
 
             # Save training snapshot
@@ -79,6 +101,7 @@ def main():
         num_samples = opt.iters['valid'] * opt.batchsize
         split = opt.predict
         idxs = opt.idx_ref[split]
+        num_samples = idxs.shape[0]
 
         pred_dims = {k:[int(d) for d in pred[k].shape[1:]] for k in pred}
         final_preds = {k:np.zeros((num_samples, *pred_dims[k])) for k in pred}
@@ -88,7 +111,7 @@ def main():
         print("Generating predictions...")
         loader.start_epoch(sess, split, train_flag, num_samples, flag_val=flag_val, in_order=True)
 
-        for step in tqdm(range(opt.iters['valid']), ascii='True'):
+        for step in tqdm(range(num_samples // opt.batchsize), ascii='True'):
             tmp_idx, tmp_pred = sess.run([sample_idx, pred], feed_dict={train_flag:flag_val})
             i_ = [(step + i)*opt.batchsize for i in range(2)]
             

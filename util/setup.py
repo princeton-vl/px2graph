@@ -65,7 +65,12 @@ def init_model(opt, task, inp, label, sample_idx, train_flag):
     global_step = tf.get_variable('global_step', [], tf.int32, trainable=False)
     model = importlib.import_module('px2graph.models.' + opt.model)
     opt_fn = tf.train.__dict__[opt.optimizer]
-    optim = opt_fn(opt.learning_rate)
+    opt_args = []
+    lr = tf.placeholder(tf.float32, [])
+
+    if opt.optimizer == 'MomentumOptimizer': opt_args = [.9]
+
+    optim = opt_fn(lr, *opt_args)
     update_ops = tf.get_collection(tf.GraphKeys.UPDATE_OPS)
 
     def setup_network(inp, label):
@@ -119,4 +124,4 @@ def init_model(opt, task, inp, label, sample_idx, train_flag):
                                     if tmp_[0] is not None else tmp_ for tmp_ in grads]
         optim = optim.apply_gradients(grads, global_step=global_step)
 
-    return net, loss, pred, accuracy, optim
+    return net, loss, pred, accuracy, optim, lr

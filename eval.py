@@ -121,5 +121,9 @@ def main():
     print("R@50:", avg_ar_50)
     print("R@100:", avg_ar_100)
 
+    tmp_pred_dir = '/'.join(pred_dir.split('/')[:-1])
+    with open('exp/' + tmp_pred_dir + '/result.txt','w') as f:
+        f.write('%.4f %.4f\n' % (avg_ar_50, avg_ar_100))
+
 if __name__ == '__main__':
     main()

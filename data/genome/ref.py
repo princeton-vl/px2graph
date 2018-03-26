@@ -44,13 +44,8 @@ with h5py.File(data_dir + '/VG-SGG.h5','r') as f:
 bb1024[:,:2] = bb1024[:,:2] - bb1024[:,2:] / 2
 bb1024[:,2:] = bb1024[:,:2] + bb1024[:,2:]
 
-# Load RPN proposal info
-roi = h5py.File(data_dir + '/proposals.h5', 'r')
-im_scales = roi['im_scales']
-im_to_roi_idx = roi['im_to_roi_idx']
-num_rois = roi['num_rois']
-rpn_rois = roi['rpn_rois']
-rpn_scores = roi['rpn_scores']
+# RPN proposal info (only loaded if opt.use_rpn is set)
+im_scales, im_to_roi_idx, num_rois, rpn_rois, rpn_scores = [None]*5
 
 def setup_val_split(opt):
     ref_idxs = np.arange(num_examples)
@@ -65,8 +60,18 @@ def setup_val_split(opt):
     return train_idxs, valid_idxs, test_idxs
 
 def initialize(opt):
+    global im_scales, im_to_roi_idx, num_rois, rpn_rois, rpn_scores
     opt.idx_ref = {}
     opt.idx_ref['train'], opt.idx_ref['valid'], opt.idx_ref['test'] = setup_val_split(opt)
+
+    if opt.use_rpn:
+        print("Loading region proposals")
+        with h5py.File(data_dir + '/proposals.h5', 'r') as roi:
+            im_scales = roi['im_scales'][:]
+            im_to_roi_idx = roi['im_to_roi_idx'][:]
+            num_rois = roi['num_rois'][:]
+            rpn_rois = roi['rpn_rois'][:]
+            rpn_scores = roi['rpn_scores'][:]
 
 def get_id(idx):
     return img_info[idx].id

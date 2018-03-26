@@ -548,13 +548,18 @@ class Task(ParentTask):
         batchsize = int(net[0].shape[0])
         num_anchors = len(self.anchors)
         opt = self.opt
-        thr = opt.detect_thr
 
-        # Take last half of network output which is collected from predicted
-        # keypoint locations (no ground truth information is used)
-        tmp_net = [(net[i][:,opt.max_nodes:] if i not in [0,12] else net[i])
-                   for i in range(len(net))]
-        tmp_net[12] = tmp_net[12][:,:,opt.max_nodes:]
+        if opt.sg_task == 'SG':
+            # For SG, take last half of network output which is collected from
+            # predicted keypoint locations (no ground truth information is used)
+            tmp_net = [(net[i][:,opt.max_nodes:] if i not in [0,12] else net[i])
+                       for i in range(len(net))]
+            tmp_net[12] = tmp_net[12][:,:,opt.max_nodes:]
+        else:
+            # For PR and CL tasks use ground truth object locations
+            tmp_net = [(net[i][:,:opt.max_nodes] if i not in [0,12] else net[i])
+                       for i in range(len(net))]
+            tmp_net[12] = tmp_net[12][:,:,:opt.max_nodes]
 
         for i in [1,7]:
             # Tile heatmap activations across slots
@@ -566,11 +571,12 @@ class Task(ParentTask):
             tmp_net[i] = tf.reshape(tmp_net[i], [batchsize, -1, last_dim])
 
             # Apply sigmoid to all logits
-            if i in [1,2,3,7,8,9]: tmp_net[i] = tf.nn.sigmoid(tmp_net[i])
+            if i in [1,2,7,8]: tmp_net[i] = tf.nn.sigmoid(tmp_net[i])
 
         # Unpack network output
         hm_acts = tmp_net[0]
         obj_acts, obj_scores, obj_classes, node_tags, bbox_anch, bbox_reg = tmp_net[1:7]
+        obj_scores_, obj_classes_, tags_, bbox_anch_, bbox_reg_ = self.__aux_data[:5]
         rel_acts, rel_scores, rel_classes, sbj_tags, obj_tags, kp_ref = tmp_net[7:]
         # Unpack ground truth labels
         num_kp_ref, classes_gt, bbox_gt, rels_gt, obj_ref = label
@@ -584,6 +590,13 @@ class Task(ParentTask):
             n_gt_objs = tf.size(tf.where(obj_ref[i,:,0] > -1))
             obj_cat_gt = obj_ref[i,:n_gt_objs,2]
             obj_bbox_gt = obj_ref[i,:n_gt_objs,3:]
+
+            # Raw gt values matched up when applying loss
+            obj_cat_gt_ = tf.reshape(classes_gt[i,:,:opt.obj_slots], [-1])
+            obj_bbox_gt_ = tf.reshape(bbox_gt[i], [opt.max_nodes*opt.obj_slots, -1])
+            filter_idxs = tf.squeeze(tf.where(obj_bbox_gt_[:,0] > -1), 1)
+            obj_cat_gt_ = tf.gather(obj_cat_gt_[:], filter_idxs)
+            obj_bbox_gt_ = tf.gather(obj_bbox_gt_[:], filter_idxs)
 
             # Ground truth relationships
             rel_idxs_gt = tf.where(classes_gt[i,:,opt.obj_slots:] > -1)
@@ -614,10 +627,28 @@ class Task(ParentTask):
             # Object predictions
             # -------------------------------------------------------------
 
-            obj_vals = [v[i] for v in tmp_net[3:7]]
-            tmp_obj_scores, obj_vals, tmp_kps, n_objs = get_top_detections( \
-                obj_acts[i], obj_scores[i], obj_vals, kp_ref[i,0], thr[:3], opt.obj_slots)
-            tmp_class, tmp_tag, tmp_anch, tmp_box_reg = obj_vals
+            if opt.sg_task in ['SG', 'CL']:
+                n_ = n_gt_objs if opt.sg_task == 'CL' else opt.max_nodes
+                n_ *= opt.obj_slots
+
+                obj_vals = [v[i] for v in tmp_net[3:7]]
+                tmp_obj_scores, obj_vals, tmp_kps, n_objs = get_top_detections( \
+                    obj_acts[i,:n_], obj_scores[i,:n_], obj_vals, kp_ref[i,0], opt.obj_thr, opt.obj_slots)
+                tmp_class, tmp_tag, tmp_anch, tmp_box_reg = obj_vals
+
+            elif opt.sg_task == 'PR':
+                # Use ground truth objects
+                tmp_obj_scores = tf.nn.sigmoid(tf.squeeze(tf.gather(obj_scores_[i], filter_idxs),1))
+                tmp_tag = tf.gather(tags_[i], filter_idxs)
+
+                tmp_class = tf.one_hot(obj_cat_gt_, 150)
+                tmp_anch = tf.one_hot(tf.to_int32(obj_bbox_gt_[:,0]), len(self.anchors))
+                tmp_box_reg = tf.tile(obj_bbox_gt_[:,1:], [1,len(self.anchors)])
+
+                kp_idxs = tf.to_int32(filter_idxs // opt.obj_slots)
+                tmp_kps = tf.gather(kp_ref[i,0], kp_idxs)
+                n_objs = tf.size(filter_idxs)
+
             k = 5
 
             def postprocess_objs():
@@ -631,6 +662,7 @@ class Task(ParentTask):
                 to_concat = [tf.expand_dims(tmp_obj_scores, 1),
                              obj_cat_topk, obj_cat_scores, obj_bbox_pred, tmp_tag]
                 objs = tf.concat([tf.to_float(v) for v in to_concat], 1)
+                n_objs = tf.shape(objs)[0]
 
                 # Do NMS on bounding boxes (per class)
                 if opt.obj_box_nms > 0:
@@ -721,12 +753,13 @@ class Task(ParentTask):
 
             rel_vals = [v[i] for v in tmp_net[9:12]]
             tmp_scores_aux, rel_vals, _, n_rels = get_top_detections( \
-                rel_acts[i], rel_scores[i], rel_vals, kp_ref[i,0], thr[3:], opt.rel_slots)
-            k = 5
+                    rel_acts[i], rel_scores[i], rel_vals, kp_ref[i,0], opt.rel_thr, opt.rel_slots)
+            k = opt.rel_top_k
             
             def postprocess_rels():
                 tmp_rel_class, sbj_tag, obj_tag = rel_vals
                 rel_cat_scores, rel_cat_topk = tf.nn.top_k(tmp_rel_class, k=k)
+                rel_cat_scores = tf.nn.sigmoid(rel_cat_scores)
 
                 def matchup(tag_ref, tag_pred):
                     # n_rels x n_objs x tag_dim
@@ -742,9 +775,10 @@ class Task(ParentTask):
                 tile_ = lambda x: tf.tile(tf.expand_dims(x, 1), [1,k])
                 tmp_scores = tile_(tmp_scores_aux)
                 score_offset = tf.to_float(tf.meshgrid(tf.range(k), tf.range(n_rels))[0])
-                tmp_scores = tmp_scores * .5 + \
-                             rel_cat_scores * .25 + \
-                             .05 * (5 - score_offset)
+                t_ = opt.class_thr
+                tmp_scores = tmp_scores * t_[0] + \
+                             rel_cat_scores * t_[1] + \
+                             t_[2] * (t_[3] - score_offset)
                 tmp_scores = tf.reshape(tmp_scores, [n_rels*k])
 
                 # Find unique tuples
